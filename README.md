@@ -418,21 +418,27 @@ Press **q** or **ESC** to quit. Options:
 ```bash
 python -m scripts.recognize --camera 1                    # force a specific camera index
 python -m scripts.recognize --threshold 0.5
-python -m scripts.recognize --skip 5 --det-size 480       # faster on a low-end CPU
+python -m scripts.recognize --skip 5 --det-size 480       # faster labels on a low-end CPU
+python -m scripts.recognize --res 1280x720                # higher-resolution feed
 ```
 
-**Why the picture is fast but the labels "refresh" slowly.** Recognising a
-face needs a full run of SCRFD + ArcFace, which on a normal laptop CPU takes
-roughly **0.4–0.6 s** (already optimised — see `FR_ONNX_THREADS` in §6). If we
-did that on every frame, the whole video would drop to ~2 FPS and look frozen.
-So by default the tool **re-runs recognition only every 3rd frame** and keeps
-the previous boxes/labels on screen in between: the video stays smooth, and the
-name just updates a couple of times per second. Controls:
+**How fast will the video run?** On a normal webcam the hardware caps the
+stream at **~30 FPS** (60 FPS only on cameras that explicitly support it —
+measured here: ≈30 FPS at 640×480 and ≈27 FPS at 1280×720). No software can
+exceed that ceiling.
 
-- `--skip N` — run recognition once every N frames (`1` = every frame,
-  `N` = much smoother video, slower label updates);
+**The important design choice:** recognition itself is expensive (~0.4 s of CPU
+per face), so it runs on a **separate background thread**. The main loop only
+reads the camera and draws the window, which therefore always runs at the
+camera's true maximum rate — recognition *never* slows the video down. The
+boxes/labels are just refreshed by the worker every `--skip`-th frame. Controls:
+
+- `--skip N` — run recognition once every N frames (`1` = most up-to-date
+  labels, `N` = smoother CPU usage);
 - `--det-size W` — shrink the image fed to the detector (e.g. `480` or
-  `416`); slightly less accurate on far/ small faces but noticeably faster.
+  `416`); slightly less accurate on far/small faces but noticeably faster;
+- `--res WxH` — camera resolution (`640x480` default = highest FPS, `1280x720`
+  = sharper but ~3 FPS less).
 
 > On many Windows laptops the built-in camera is index 0 and an external USB
 > webcam is index 1. The tool **automatically picks the first camera that
@@ -518,8 +524,9 @@ FR_THRESHOLD=0.5 python -m scripts.recognize_image --image photo.jpg
 |-----------------|---------|--------------------------------------------------|
 | `--camera N`    | `0`     | preferred webcam device index                    |
 | `--threshold F` | `0.40`  | Known/Unknown boundary                           |
-| `--skip N`      | `3`     | run recognition once every N frames (video plays smoothly, labels update at ~1 frame in N) |
+| `--skip N`      | `3`     | worker runs recognition once every N frames (video always runs at the camera's max FPS) |
 | `--det-size W`  | `640`   | square resolution fed to the SCRFD detector (smaller = faster) |
+| `--res WxH`     | `640x480`| camera resolution (smaller = higher FPS)          |
 
 ### `python -m scripts.visualize`
 

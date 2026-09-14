@@ -9,11 +9,13 @@ Every frame shows each detected face with a box and a label like:
     Jordan 0.83     (score >= threshold -> Known)
     Unknown 0.34    (score <  threshold -> Unknown)
 
-Performance: running detection+embedding on EVERY frame is slow on a CPU.
-By default the pipeline is therefore re-run only every 3rd frame -- the live
-video keeps streaming smoothly and the last boxes/labels stay on screen in
-between. Use --skip 1 to process every frame, or --skip 5+ for a low-end CPU.
---det-size shrinks the SCRFD input image for a further speedup.
+Performance design
+------------------
+Recognition (SCRFD + ArcFace, ~0.4 s on a laptop CPU) runs on a SEPARATE
+thread, so it can never stall the video: the main loop only reads the camera
+and displays frames, which runs at the camera's own maximum rate (≈30 fps for
+a normal USB webcam — its hardware limit, regardless of software). On every
+--skip-th frame the worker grabs the newest frame and refreshes the labels.
 
 Controls:  q / ESC  -> quit
 """
@@ -23,6 +25,7 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import threading
 import time
 
 import cv2
@@ -58,6 +61,8 @@ def build_parser() -> argparse.ArgumentParser:
                         help="square size fed to the SCRFD detector "
                              f"(default {DETECTOR_INPUT_SIZE[0]}; smaller is "
                              "much faster, e.g. 480 or 416)")
+    parser.add_argument("--res", default="640x480",
+                        help="camera resolution WxH (e.g. 1280x720)")
     return parser
 
 
@@ -74,12 +79,25 @@ def _frame_is_usable(frame: np.ndarray, min_brightness: float = 25.0) -> bool:
     return float(np.mean(frame)) >= min_brightness
 
 
-def open_usable_camera(preferred: int, max_tries: int = 4):
-    """Open the preferred camera, falling back to any working device."""
+def open_usable_camera(preferred: int, max_tries: int = 4, res: tuple = (640, 480)):
+    """Open the preferred camera, falling back to any working device.
+
+    Requests the MJPG codec + the given resolution and a high FPS target: many
+    webcams deliver more frames with MJPG and a smaller frame than on their
+    default raw/RGB pipeline. We then warm the camera up (auto-exposure /
+    white-balance need a few frames) and require real (non-black) content.
+    """
     for idx in range(preferred, max_tries):
         cap = cv2.VideoCapture(idx)
         if not cap.isOpened():
             continue
+        try:
+            cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+        except AttributeError:
+            pass
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, res[0])
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, res[1])
+        cap.set(cv2.CAP_PROP_FPS, 60)  # ask high; the camera gives what it can
         # warm up a few frames so auto-exposure/auto-white-balance settle
         for _ in range(8):
             ok, frame = cap.read()
@@ -108,11 +126,67 @@ def _draw(annotated, result) -> None:
     )
 
 
+class _SharedState:
+    """Thread-safe hand-off between the camera loop and the recognition worker."""
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.frame = None        # newest frame from the camera (BGR)
+        self.results: list = []  # latest recognition output (may lag the frame)
+
+    def publish_frame(self, frame) -> None:
+        with self.lock:
+            self.frame = frame
+
+    def snapshot(self):
+        """Copy of (frame, current results) without blocking the producer long."""
+        with self.lock:
+            return self.frame, list(self.results)
+
+    def publish_results(self, results) -> None:
+        with self.lock:
+            self.results = results
+
+
+def recognition_worker(pipeline, state: _SharedState, skip: int,
+                       stop: threading.Event) -> None:
+    """Run the (expensive) pipeline on a background thread.
+
+    The camera loop keeps streaming/displaying at the camera's true max FPS;
+    this thread simply updates the labels every --skip-th *new* frame. ONNX
+    sessions are thread-safe, so calling recognize_frame() here is safe.
+    """
+    seen = 0
+    while not stop.is_set():
+        frame, _ = state.snapshot()
+        if frame is None:
+            time.sleep(0.005)
+            continue
+        if seen % skip != 0:
+            seen += 1
+            continue
+        seen += 1
+        try:
+            results = pipeline.recognize_frame(frame)
+        except ValueError as exc:  # empty enrollment db
+            print(f"ERROR: {exc}", file=sys.stderr)
+            stop.set()
+            return
+        state.publish_results(results)
+
+
 def main() -> int:
     args = build_parser().parse_args()
 
     if args.skip < 1:
         print("ERROR: --skip must be >= 1.", file=sys.stderr)
+        return 1
+
+    try:
+        width, height = (int(x) for x in args.res.lower().split("x"))
+    except ValueError:
+        print(f"ERROR: --res must look like 640x480, got {args.res!r}.",
+              file=sys.stderr)
         return 1
 
     if args.det_size > 0:
@@ -131,7 +205,7 @@ def main() -> int:
         print(f"SETUP ERROR: {exc}", file=sys.stderr)
         return 1
 
-    cap, used_index = open_usable_camera(args.camera)
+    cap, used_index = open_usable_camera(args.camera, res=(width, height))
     if cap is None:
         print(
             f"ERROR: could not find a working webcam (tried indices {args.camera}.."
@@ -143,51 +217,55 @@ def main() -> int:
         print(f"NOTE: using camera index {used_index} "
               f"(index {args.camera} was black or unavailable).")
 
+    # Background recognition: the display loop never waits for the pipeline.
+    state = _SharedState()
+    stop = threading.Event()
+    worker = threading.Thread(
+        target=recognition_worker,
+        args=(pipeline, state, args.skip, stop),
+        daemon=True,
+    )
+    worker.start()
+
     print("Recognition started. Press q or ESC to quit.")
-    frame_index = 0
-    last_results = []
     fps_window = 30
     fps_times = []
 
-    while True:
-        t0 = time.perf_counter()
-        ok, frame = cap.read()
-        if not ok or frame is None:
-            print("ERROR: lost the webcam stream. Quitting.", file=sys.stderr)
-            break
+    try:
+        while True:
+            t0 = time.perf_counter()
+            ok, frame = cap.read()
+            if not ok or frame is None:
+                print("ERROR: lost the webcam stream. Quitting.", file=sys.stderr)
+                break
 
-        annotated = frame.copy()
-        # Re-run the (expensive) pipeline only every --skip frames; in between,
-        # keep the previous boxes/labels so the feed stays interactive.
-        if frame_index % args.skip == 0:
-            try:
-                last_results = pipeline.recognize_frame(frame)
-            except ValueError as exc:  # empty enrollment db
-                print(f"ERROR: {exc}", file=sys.stderr)
-                return 1
+            state.publish_frame(frame)
+            _, results = state.snapshot()
 
-        for result in last_results:
-            _draw(annotated, result)
+            annotated = frame.copy()
+            for result in results:
+                _draw(annotated, result)
 
-        # small debug overlay: display + recognition rates
-        fps_times.append(t0)
-        if len(fps_times) > fps_window:
-            fps_times.pop(0)
-        if len(fps_times) > 1:
-            span = fps_times[-1] - fps_times[0]
-            disp = len(fps_times) / span if span > 0 else 0
-            cv2.putText(annotated, f"display {disp:.0f} fps",
-                        (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
-                        (255, 255, 0), 2, cv2.LINE_AA)
+            # display-rate counter so you can SEE the video is not slowed down
+            fps_times.append(t0)
+            if len(fps_times) > fps_window:
+                fps_times.pop(0)
+            if len(fps_times) > 1:
+                span = fps_times[-1] - fps_times[0]
+                disp = len(fps_times) / span if span > 0 else 0
+                cv2.putText(annotated, f"display {disp:.0f} fps",
+                            (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
+                            (255, 255, 0), 2, cv2.LINE_AA)
 
-        cv2.imshow("Face Recognition (ArcFace + ONNX)", annotated)
-        key = cv2.waitKey(1) & 0xFF
-        if key in (ord("q"), 27):  # q or ESC
-            break
-        frame_index += 1
-
-    cap.release()
-    cv2.destroyAllWindows()
+            cv2.imshow("Face Recognition (ArcFace + ONNX)", annotated)
+            key = cv2.waitKey(1) & 0xFF
+            if key in (ord("q"), 27):  # q or ESC
+                break
+    finally:
+        stop.set()
+        cap.release()
+        cv2.destroyAllWindows()
+        worker.join(timeout=2.0)
     return 0
 
 
