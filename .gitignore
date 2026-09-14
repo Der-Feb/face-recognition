@@ -1,0 +1,41 @@
+# ---- Biometric data: NEVER commit real faces or embeddings ----
+data/faces/*
+data/embeddings/*
+!data/faces/.gitkeep
+!data/embeddings/.gitkeep
+
+# ---- ML models (large binaries downloaded by scripts/download_models.py) ----
+models/*
+!models/.gitkeep
+
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.egg
+build/
+dist/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# ---- Virtual environments ----
+.venv/
+venv/
+env/
+ENV/
+
+# ---- Secrets / environment ----
+.env
+.env.*
+*.key
+
+# ---- Editor / OS ----
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+
+# ---- Output images produced by the demo ----
+outputs/

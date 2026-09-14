@@ -1,0 +1,1 @@
+"""Empty init so that `python -m scripts.*` resolves the scripts package."""

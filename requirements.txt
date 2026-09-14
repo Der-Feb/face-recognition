@@ -1,0 +1,14 @@
+# Core dependencies for the ArcFace + ONNX face recognition project.
+#
+# Install all of them with:
+#   pip install -r requirements.txt
+#
+# NOTE: Run everything on the CPU. No GPU drivers or CUDA are required.
+# onnxruntime here is the CPU build (the default package).
+
+onnxruntime>=1.16.0
+opencv-python>=4.8.0
+numpy>=1.26.0
+
+# Testing (optional but recommended)
+pytest>=7.4.0
