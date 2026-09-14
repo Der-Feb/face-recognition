@@ -27,6 +27,12 @@ FACES_DIR = os.path.join(DATA_DIR, "faces")
 EMBEDDINGS_DIR = os.path.join(DATA_DIR, "embeddings")
 OUTPUTS_DIR = os.path.join(PROJECT_ROOT, "outputs")
 
+# Where webcam photos/videos are saved ("s" and "r" keys in scripts/recognize).
+# Defaults to the user's Downloads folder; falls back to outputs/ if missing.
+DOWNLOADS_DIR = os.path.expanduser("~/Downloads")
+if not os.path.isdir(DOWNLOADS_DIR):
+    DOWNLOADS_DIR = OUTPUTS_DIR
+
 # --------------------------------------------------------------------------
 # ONNX models.
 # --------------------------------------------------------------------------

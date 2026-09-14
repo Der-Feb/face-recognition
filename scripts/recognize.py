@@ -1,6 +1,6 @@
 """Live webcam recognition.
 
-Usage (from the project root):
+Usage (from the root project folder):
     python -m scripts.recognize
     python -m scripts.recognize --camera 0 --threshold 0.4
     python -m scripts.recognize --skip 2 --det-size 480   # faster on CPU
@@ -9,6 +9,11 @@ Every frame shows each detected face with a box and a label like:
     Jordan 0.83     (score >= threshold -> Known)
     Unknown 0.34    (score <  threshold -> Unknown)
 
+Window keys:
+    s        capture the current frame as a JPEG in your Downloads folder
+    r        start / stop recording an MP4 video in your Downloads folder
+    q / ESC  quit
+
 Performance design
 ------------------
 Recognition (SCRFD + ArcFace, ~0.4 s on a laptop CPU) runs on a SEPARATE
@@ -16,13 +21,12 @@ thread, so it can never stall the video: the main loop only reads the camera
 and displays frames, which runs at the camera's own maximum rate (≈30 fps for
 a normal USB webcam — its hardware limit, regardless of software). On every
 --skip-th frame the worker grabs the newest frame and refreshes the labels.
-
-Controls:  q / ESC  -> quit
 """
 
 from __future__ import annotations
 
 import argparse
+import datetime as _dt
 import os
 import sys
 import threading
@@ -38,6 +42,7 @@ from app.config import (                            # noqa: E402
     DETECTOR_INPUT_SIZE,
     DETECTOR_MODEL_PATH,
     DETECTOR_NMS,
+    DOWNLOADS_DIR,
     MATCHING_THRESHOLD,
 )
 from app.detector import SCRFDDetector               # noqa: E402
@@ -107,6 +112,10 @@ def open_usable_camera(preferred: int, max_tries: int = 4, res: tuple = (640, 48
     return None, None
 
 
+def _timestamp_stamp() -> str:
+    return _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+
+
 def _draw(annotated, result) -> None:
     """Draw box + label + confidence for one recognition result."""
     x1, y1, x2, y2 = (int(v) for v in result.bbox)
@@ -124,6 +133,39 @@ def _draw(annotated, result) -> None:
         annotated, label, (x1 + 4, top + text_h + 4),
         cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 0), 1, cv2.LINE_AA,
     )
+
+
+def _draw_status_bar(annotated, display_fps: float, recording: bool, record_start):
+    """Top-left strip: FPS + REC indicator + key hints (always visible)."""
+    h, w = annotated.shape[:2]
+    bar = np.full((46, w, 3), 18, dtype=np.uint8)  # dark strip
+
+    cv2.putText(bar, f"display {display_fps:.0f} fps",
+                (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.55,
+                (255, 255, 0), 1, cv2.LINE_AA)
+
+    hint = "s = save photo    r = record video    q = quit"
+    (tw, th), _ = cv2.getTextSize(hint, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
+    cv2.putText(bar, hint, (w - tw - 12, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.5,
+                (200, 200, 200), 1, cv2.LINE_AA)
+
+    if recording:
+        elapsed = time.monotonic() - (record_start or time.monotonic())
+        minutes, seconds = int(elapsed // 60), int(elapsed % 60)
+        label = f"REC {minutes:02d}:{seconds:02d}"
+        center = w // 2
+        cv2.circle(bar, (center - 10, 22), 8, (0, 0, 255), -1)
+        cv2.putText(bar, label, (center + 2, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2, cv2.LINE_AA)
+
+    annotated[0:46, :, :] = bar
+
+
+def _labeled_frame(frame, results) -> np.ndarray:
+    annotated = frame.copy()
+    for result in results:
+        _draw(annotated, result)
+    return annotated
 
 
 class _SharedState:
@@ -227,9 +269,13 @@ def main() -> int:
     )
     worker.start()
 
-    print("Recognition started. Press q or ESC to quit.")
+    print(f"Saved photos/videos go to: {DOWNLOADS_DIR}")
+    print("Controls: s = save photo | r = start/stop video | q/ESC = quit")
     fps_window = 30
     fps_times = []
+    writer = None          # cv2.VideoWriter while recording
+    record_start = None    # monotonic time when recording began
+    rec_fps = 20.0         # fps used for the mp4 (set from real camera fps)
 
     try:
         while True:
@@ -241,10 +287,7 @@ def main() -> int:
 
             state.publish_frame(frame)
             _, results = state.snapshot()
-
-            annotated = frame.copy()
-            for result in results:
-                _draw(annotated, result)
+            annotated = _labeled_frame(frame, results)
 
             # display-rate counter so you can SEE the video is not slowed down
             fps_times.append(t0)
@@ -253,16 +296,57 @@ def main() -> int:
             if len(fps_times) > 1:
                 span = fps_times[-1] - fps_times[0]
                 disp = len(fps_times) / span if span > 0 else 0
-                cv2.putText(annotated, f"display {disp:.0f} fps",
-                            (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
-                            (255, 255, 0), 2, cv2.LINE_AA)
+            else:
+                disp = 0.0
+            if writer is not None:
+                rec_fps = max(5.0, min(disp, 120.0)) if disp > 0 else rec_fps
+                writer.write(annotated)
 
+            _draw_status_bar(annotated, disp, writer is not None, record_start)
             cv2.imshow("Face Recognition (ArcFace + ONNX)", annotated)
             key = cv2.waitKey(1) & 0xFF
-            if key in (ord("q"), 27):  # q or ESC
+
+            # ---- photo capture: 's' -------------------------------------
+            if key == ord("s"):
+                name = f"fr_capture_{_timestamp_stamp()}.jpg"
+                path = os.path.join(DOWNLOADS_DIR, name)
+                if cv2.imwrite(path, annotated):
+                    print(f"Saved photo -> {path}")
+                else:
+                    print(f"ERROR: could not write {path}", file=sys.stderr)
+
+            # ---- video recording toggle: 'r' ----------------------------
+            elif key == ord("r"):
+                if writer is None:
+                    if disp > 0:
+                        rec_fps = disp
+                    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+                    h, w = annotated.shape[:2]
+                    rec_fps = max(5.0, min(rec_fps, 60.0))
+                    writer = cv2.VideoWriter(
+                        os.path.join(DOWNLOADS_DIR,
+                                     f"fr_video_{_timestamp_stamp()}.mp4"),
+                        fourcc, rec_fps, (w, h),
+                    )
+                    if not writer.isOpened():
+                        print("ERROR: could not create the MP4 file.",
+                              file=sys.stderr)
+                        writer = None
+                    else:
+                        record_start = time.monotonic()
+                        print("Recording started...")
+                else:
+                    writer.release()
+                    print("Recording stopped.")
+                    writer = None
+                    record_start = None
+
+            elif key in (ord("q"), 27):  # q or ESC
                 break
     finally:
         stop.set()
+        if writer is not None:
+            writer.release()
         cap.release()
         cv2.destroyAllWindows()
         worker.join(timeout=2.0)

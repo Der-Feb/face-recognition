@@ -56,6 +56,9 @@ extend.
   - recognise live from a **webcam** (`scripts/recognize.py`),
   - visualise every stage in pop-up windows for your demo
     (`scripts/visualize.py`).
+- From the live webcam window you can **save a photo** (`s` key) or
+  **start/stop recording an MP4** (`r` key) straight into your Downloads
+  folder.
 - **25 passing unit tests** (no models required).
 - Everything **runs on CPU** with pure `pip` — works on any simple laptop.
 
@@ -413,7 +416,15 @@ A window opens showing your webcam feed. Every face gets:
   (`Known: alice`);
 - a **red** box + `Unknown` when not enrolled.
 
-Press **q** or **ESC** to quit. Options:
+**Keyboard shortcuts in the window** (also shown inside the window):
+
+| key        | action                                                           |
+|------------|------------------------------------------------------------------|
+| `s`        | **save a photo** — writes `fr_capture_<timestamp>.jpg` to your **Downloads** folder |
+| `r`        | **start / stop recording** — writes `fr_video_<timestamp>.mp4` to your **Downloads** folder (a red dot + REC timer appear on screen while recording) |
+| `q` / `ESC`| quit                                                            |
+
+Options:
 
 ```bash
 python -m scripts.recognize --camera 1                    # force a specific camera index
@@ -520,13 +531,18 @@ FR_THRESHOLD=0.5 python -m scripts.recognize_image --image photo.jpg
 
 ### `python -m scripts.recognize`
 
-| flag            | default | meaning                                          |
-|-----------------|---------|--------------------------------------------------|
-| `--camera N`    | `0`     | preferred webcam device index                    |
-| `--threshold F` | `0.40`  | Known/Unknown boundary                           |
-| `--skip N`      | `3`     | worker runs recognition once every N frames (video always runs at the camera's max FPS) |
-| `--det-size W`  | `640`   | square resolution fed to the SCRFD detector (smaller = faster) |
-| `--res WxH`     | `640x480`| camera resolution (smaller = higher FPS)          |
+Streams the webcam and draws a box + label on every face.
+
+| flag            | default  | meaning                                              |
+|-----------------|----------|------------------------------------------------------|
+| `--camera N`    | `0`      | preferred webcam device index                        |
+| `--threshold F` | `0.40`   | Known/Unknown boundary                               |
+| `--skip N`      | `3`      | worker runs recognition once every N frames (video always runs at the camera's max FPS) |
+| `--det-size W`  | `640`    | square resolution fed to the SCRFD detector (smaller = faster) |
+| `--res WxH`     | `640x480`| camera resolution (smaller = higher FPS)              |
+
+Window keys: `s` save photo, `r` start/stop MP4 recording (both to your
+Downloads folder), `q`/`ESC` quit.
 
 ### `python -m scripts.visualize`
 
