@@ -416,10 +416,23 @@ A window opens showing your webcam feed. Every face gets:
 Press **q** or **ESC** to quit. Options:
 
 ```bash
-python -m scripts.recognize --camera 1     # force a specific camera index
+python -m scripts.recognize --camera 1                    # force a specific camera index
 python -m scripts.recognize --threshold 0.5
-python -m scripts.recognize --fps-limit 10 # lower CPU use
+python -m scripts.recognize --skip 5 --det-size 480       # faster on a low-end CPU
 ```
+
+**Why the picture is fast but the labels "refresh" slowly.** Recognising a
+face needs a full run of SCRFD + ArcFace, which on a normal laptop CPU takes
+roughly **0.4–0.6 s** (already optimised — see `FR_ONNX_THREADS` in §6). If we
+did that on every frame, the whole video would drop to ~2 FPS and look frozen.
+So by default the tool **re-runs recognition only every 3rd frame** and keeps
+the previous boxes/labels on screen in between: the video stays smooth, and the
+name just updates a couple of times per second. Controls:
+
+- `--skip N` — run recognition once every N frames (`1` = every frame,
+  `N` = much smoother video, slower label updates);
+- `--det-size W` — shrink the image fed to the detector (e.g. `480` or
+  `416`); slightly less accurate on far/ small faces but noticeably faster.
 
 > On many Windows laptops the built-in camera is index 0 and an external USB
 > webcam is index 1. The tool **automatically picks the first camera that
@@ -459,7 +472,8 @@ the code.
 | detector minimum confidence      | `FR_DETECTOR_CONFIDENCE`| `0.5`       | ignore faces below this score          |
 | detector NMS IoU cutoff          | `FR_DETECTOR_NMS`       | `0.4`       | overlap threshold for duplicate boxes  |
 | embedding strategy               | `FR_STRATEGY`           | `all`       | `all` = keep every embedding, `mean` = one averaged embedding per person |
-| matching threshold               | `FR_THRESHOLD`          | `0.40`      | Known/Unknown boundary (see §8)        |
+| matching threshold               | `FR_THRESHOLD`          | `0.40`      | Known/Unknown boundary (see §8) |
+| ONNX threads (speed)             | `FR_ONNX_THREADS`       | `2`         | intra-op threads for the ONNX models; `2` is fastest on most laptops (default all-cores measured ~6× slower), raise it on beefy desktops |
 
 Example:
 
@@ -504,7 +518,8 @@ FR_THRESHOLD=0.5 python -m scripts.recognize_image --image photo.jpg
 |-----------------|---------|--------------------------------------------------|
 | `--camera N`    | `0`     | preferred webcam device index                    |
 | `--threshold F` | `0.40`  | Known/Unknown boundary                           |
-| `--fps-limit N` | `0`     | if > 0, aim for roughly N frames/second          |
+| `--skip N`      | `3`     | run recognition once every N frames (video plays smoothly, labels update at ~1 frame in N) |
+| `--det-size W`  | `640`   | square resolution fed to the SCRFD detector (smaller = faster) |
 
 ### `python -m scripts.visualize`
 

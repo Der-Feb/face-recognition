@@ -3,10 +3,17 @@
 Usage (from the project root):
     python -m scripts.recognize
     python -m scripts.recognize --camera 0 --threshold 0.4
+    python -m scripts.recognize --skip 2 --det-size 480   # faster on CPU
 
 Every frame shows each detected face with a box and a label like:
     Jordan 0.83     (score >= threshold -> Known)
     Unknown 0.34    (score <  threshold -> Unknown)
+
+Performance: running detection+embedding on EVERY frame is slow on a CPU.
+By default the pipeline is therefore re-run only every 3rd frame -- the live
+video keeps streaming smoothly and the last boxes/labels stay on screen in
+between. Use --skip 1 to process every frame, or --skip 5+ for a low-end CPU.
+--det-size shrinks the SCRFD input image for a further speedup.
 
 Controls:  q / ESC  -> quit
 """
@@ -16,15 +23,23 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+import time
 
 import cv2
 import numpy as np
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from app.config import MATCHING_THRESHOLD              # noqa: E402
-from app.enrollment import EnrollmentError              # noqa: E402
-from app.recognition import RecognitionPipeline         # noqa: E402
+from app.config import (                            # noqa: E402
+    DETECTOR_CONFIDENCE,
+    DETECTOR_INPUT_SIZE,
+    DETECTOR_MODEL_PATH,
+    DETECTOR_NMS,
+    MATCHING_THRESHOLD,
+)
+from app.detector import SCRFDDetector               # noqa: E402
+from app.enrollment import EnrollmentError           # noqa: E402
+from app.recognition import RecognitionPipeline      # noqa: E402
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -36,8 +51,13 @@ def build_parser() -> argparse.ArgumentParser:
                         help="webcam device index (0 = default)")
     parser.add_argument("--threshold", type=float, default=MATCHING_THRESHOLD,
                         help="cosine-similarity threshold for Known/Unknown")
-    parser.add_argument("--fps-limit", type=int, default=0,
-                        help="if >0, downsample the frame to ~this FPS target")
+    parser.add_argument("--skip", type=int, default=3,
+                        help="run detection+embedding once every N frames "
+                             "(1 = every frame; larger = faster)")
+    parser.add_argument("--det-size", type=int, default=-1,
+                        help="square size fed to the SCRFD detector "
+                             f"(default {DETECTOR_INPUT_SIZE[0]}; smaller is "
+                             "much faster, e.g. 480 or 416)")
     return parser
 
 
@@ -91,8 +111,22 @@ def _draw(annotated, result) -> None:
 def main() -> int:
     args = build_parser().parse_args()
 
+    if args.skip < 1:
+        print("ERROR: --skip must be >= 1.", file=sys.stderr)
+        return 1
+
+    if args.det_size > 0:
+        detector = SCRFDDetector(
+            model_path=DETECTOR_MODEL_PATH,
+            input_size=(args.det_size, args.det_size),
+            confidence_threshold=DETECTOR_CONFIDENCE,
+            nms_threshold=DETECTOR_NMS,
+        )
+    else:
+        detector = None
+
     try:
-        pipeline = RecognitionPipeline()
+        pipeline = RecognitionPipeline(detector=detector)
     except (FileNotFoundError, EnrollmentError) as exc:
         print(f"SETUP ERROR: {exc}", file=sys.stderr)
         return 1
@@ -111,23 +145,40 @@ def main() -> int:
 
     print("Recognition started. Press q or ESC to quit.")
     frame_index = 0
+    last_results = []
+    fps_window = 30
+    fps_times = []
+
     while True:
+        t0 = time.perf_counter()
         ok, frame = cap.read()
         if not ok or frame is None:
             print("ERROR: lost the webcam stream. Quitting.", file=sys.stderr)
             break
 
-        # Optional crude FPS limit: only run recognition on some frames.
-        recognize_this = (args.fps_limit <= 0) or (frame_index % args.fps_limit == 0)
         annotated = frame.copy()
-        if recognize_this:
+        # Re-run the (expensive) pipeline only every --skip frames; in between,
+        # keep the previous boxes/labels so the feed stays interactive.
+        if frame_index % args.skip == 0:
             try:
-                results = pipeline.recognize_frame(frame)
-                for result in results:
-                    _draw(annotated, result)
+                last_results = pipeline.recognize_frame(frame)
             except ValueError as exc:  # empty enrollment db
                 print(f"ERROR: {exc}", file=sys.stderr)
                 return 1
+
+        for result in last_results:
+            _draw(annotated, result)
+
+        # small debug overlay: display + recognition rates
+        fps_times.append(t0)
+        if len(fps_times) > fps_window:
+            fps_times.pop(0)
+        if len(fps_times) > 1:
+            span = fps_times[-1] - fps_times[0]
+            disp = len(fps_times) / span if span > 0 else 0
+            cv2.putText(annotated, f"display {disp:.0f} fps",
+                        (10, 24), cv2.FONT_HERSHEY_SIMPLEX, 0.6,
+                        (255, 255, 0), 2, cv2.LINE_AA)
 
         cv2.imshow("Face Recognition (ArcFace + ONNX)", annotated)
         key = cv2.waitKey(1) & 0xFF

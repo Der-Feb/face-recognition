@@ -34,6 +34,7 @@ import numpy as np
 import onnxruntime as ort
 
 from .utils import (
+    build_session_options,
     clip_box_to_image,
     distance_to_bbox,
     distance_to_landmarks,
@@ -89,7 +90,8 @@ class SCRFDDetector:
                 "Run `python -m scripts.download_models` to fetch it."
             )
         self.session = ort.InferenceSession(
-            model_path, providers=providers or ["CPUExecutionProvider"]
+            model_path, sess_options=build_session_options(),
+            providers=providers or ["CPUExecutionProvider"],
         )
         self.input_name = self.session.get_inputs()[0].name
         self.output_names = [o.name for o in self.session.get_outputs()]

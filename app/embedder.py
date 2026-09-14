@@ -39,7 +39,7 @@ import cv2
 import numpy as np
 import onnxruntime as ort
 
-from .utils import l2_normalize
+from .utils import build_session_options, l2_normalize
 
 
 class ArcFaceEmbedder:
@@ -65,7 +65,8 @@ class ArcFaceEmbedder:
             )
 
         self.session = ort.InferenceSession(
-            model_path, providers=providers or ["CPUExecutionProvider"]
+            model_path, sess_options=build_session_options(),
+            providers=providers or ["CPUExecutionProvider"],
         )
 
         # ==== Inspect the model: input name / declared shape / dtype ========
