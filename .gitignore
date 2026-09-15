@@ -26,12 +26,9 @@ env/
 ENV/
 
 # ---- Secrets / environment ----
-.env
-.env.*
 *.key
 
 # ---- Editor / OS ----
-.vscode/
 .idea/
 *.swp
 .DS_Store
@@ -39,3 +36,5 @@ Thumbs.db
 
 # ---- Output images produced by the demo ----
 outputs/
+config.bat
+node_modules
